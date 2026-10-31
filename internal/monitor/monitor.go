@@ -58,6 +58,7 @@ func New(st *store.Store, p *sshpool.Pool, e *execx.Runner, interval time.Durati
 func (m *Manager) Start(ctx context.Context) {
 	ctx, m.cancel = context.WithCancel(ctx)
 	m.cleanup(ctx)
+	go m.compactMetricStorage(ctx)
 	go func() {
 		clean := time.NewTicker(time.Hour)
 		defer clean.Stop()
@@ -79,6 +80,7 @@ func (m *Manager) Start(ctx context.Context) {
 				go m.Poll(ctx)
 			case <-clean.C:
 				m.cleanup(ctx)
+				go m.compactMetricStorage(ctx)
 			case <-ckpt.C:
 				ckptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				busy, err := m.Store.CheckpointWAL(ckptCtx)
@@ -92,6 +94,13 @@ func (m *Manager) Start(ctx context.Context) {
 		}
 	}()
 }
+
+func (m *Manager) compactMetricStorage(ctx context.Context) {
+	if err := m.Store.CompactMetricStorage(ctx); err != nil && ctx.Err() == nil {
+		log.Printf("压缩历史监控指标失败: %v", err)
+	}
+}
+
 func (m *Manager) Stop() {
 	if m.cancel != nil {
 		m.cancel()

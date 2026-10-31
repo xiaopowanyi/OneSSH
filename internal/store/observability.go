@@ -146,14 +146,22 @@ func (s *Store) ListAuditTools(ctx context.Context) ([]string, error) {
 	return tools, rows.Err()
 }
 func (s *Store) AddMetric(ctx context.Context, m Metric) error {
+	disks, _, err := encodeMetricDisks(m.DisksJSON)
+	if err != nil {
+		return fmt.Errorf("压缩磁盘指标: %w", err)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	_, err := s.DB.ExecContext(ctx, `INSERT OR REPLACE INTO metrics(host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json) VALUES(?,?,?,?,?,?,?)`, m.HostID, m.Ts, nullFloat(m.CPUPct), nullInt(m.MemUsedKB), nullInt(m.MemTotalKB), nullFloat(m.Load1), m.DisksJSON)
+	_, err = s.DB.ExecContext(ctx, `INSERT OR REPLACE INTO metrics(host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json) VALUES(?,?,?,?,?,?,?)`, m.HostID, m.Ts, nullFloat(m.CPUPct), nullInt(m.MemUsedKB), nullInt(m.MemTotalKB), nullFloat(m.Load1), disks)
 	return err
 }
 func (s *Store) LatestMetric(ctx context.Context, hostID int64) (Metric, error) {
 	var m Metric
-	err := s.DB.QueryRowContext(ctx, `SELECT host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json FROM metrics WHERE host_id=? ORDER BY ts DESC LIMIT 1`, hostID).Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &m.DisksJSON)
+	var disks sql.NullString
+	err := s.DB.QueryRowContext(ctx, `SELECT host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json FROM metrics WHERE host_id=? ORDER BY ts DESC LIMIT 1`, hostID).Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &disks)
+	if err == nil && disks.Valid {
+		m.DisksJSON, err = decodeMetricDisks(disks.String)
+	}
 	return m, err
 }
 func (s *Store) MetricsSince(ctx context.Context, hostID, since int64) ([]Metric, error) {
@@ -165,8 +173,15 @@ func (s *Store) MetricsSince(ctx context.Context, hostID, since int64) ([]Metric
 	out := make([]Metric, 0)
 	for rows.Next() {
 		var m Metric
-		if err := rows.Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &m.DisksJSON); err != nil {
+		var disks sql.NullString
+		if err := rows.Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &disks); err != nil {
 			return nil, err
+		}
+		if disks.Valid {
+			m.DisksJSON, err = decodeMetricDisks(disks.String)
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, m)
 	}

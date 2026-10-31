@@ -67,6 +67,12 @@ var migration0016 string
 //go:embed migrations/0017_performance_indexes.sql
 var migration0017 string
 
+//go:embed migrations/0018_metrics_timestamp_index.sql
+var migration0018 string
+
+//go:embed migrations/0019_metric_disk_compression.sql
+var migration0019 string
+
 // disabledToolsColumns 是迁移 0013 的目标列，与 migrations/0013_token_disabled_tools.sql 一致。
 //
 // 单独在 Go 里再声明一份，是为了让"迁移 13"和"启动自检"共用同一条 DDL：
@@ -218,6 +224,8 @@ func migrate(db *sql.DB) error {
 		{version: 15, sql: migration0015},
 		{version: 16, sql: migration0016},
 		{version: 17, sql: migration0017},
+		{version: 18, sql: migration0018},
+		{version: 19, sql: migration0019},
 	} {
 		if err := applyMigration(db, m); err != nil {
 			return fmt.Errorf("版本 %d: %w", m.version, err)

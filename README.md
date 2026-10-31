@@ -356,6 +356,8 @@ export ONESSH_DATA_DIR="$PWD/data"
 
 原生二进制必须把 `ONESSH_DATA_DIR` 指向当前用户可写目录；容器内继续使用 `/data`。网关部署平台与 SSH 目标平台彼此独立，但内置 CPU、内存和负载监控目前只采集 Linux 目标机的 `/proc`。
 
+已有数据库可运行 `./onessh compact-db`（Windows 为 `onessh.exe compact-db`）压缩历史磁盘指标并回收 SQLite 空闲页，不会删除采样记录。服务升级后也会在后台自动执行这项可续跑的维护。
+
 前端热更新用 `cd web && npm run dev`，Vite 会把 `/api` 与 `/mcp` 代理到 `:8866`。
 
 ## 测试

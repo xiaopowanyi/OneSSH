@@ -30,6 +30,12 @@ var version = "dev"
 const gracefulShutdownTimeout = 15 * time.Second
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "compact-db" {
+		if err := compactDB(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -121,4 +127,22 @@ func main() {
 	// 走到这里监听已经停止，defer 会把 mcpService（后台轮询与文件连接）、连接池和 SQLite
 	// 按注册的逆序收掉。
 	log.Printf("OneSSH 已停止")
+}
+
+// compactDB performs the resumable, lossless metric compression and SQLite
+// compaction without requiring the server's encryption or admin credentials.
+func compactDB() error {
+	dataDir := os.Getenv("ONESSH_DATA_DIR")
+	if dataDir == "" {
+		dataDir = "/data"
+	}
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	return st.CompactMetricStorage(ctx)
 }
