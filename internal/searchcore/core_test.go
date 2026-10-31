@@ -56,7 +56,7 @@ func TestGrepMatchesContextAndProtectsTraversal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, filepath.Join(root, "linked.go")); err != nil {
-		t.Fatal(err)
+		t.Skipf("环境不支持符号链接: %v", err)
 	}
 
 	result, err := Grep(context.Background(), localSearchFS{cwd: root}, GrepOptions{
@@ -94,7 +94,7 @@ func TestFindUsesDoubleStarIgnoresSymlinksAndLimits(t *testing.T) {
 	writeSearchFixture(t, root, "nested/pkg/other_test.go", []byte("package pkg\n"))
 	writeSearchFixture(t, root, "vendor/ignored_test.go", []byte("package vendor\n"))
 	if err := os.Symlink(filepath.Join(root, "pkg"), filepath.Join(root, "linked")); err != nil {
-		t.Fatal(err)
+		t.Skipf("环境不支持符号链接: %v", err)
 	}
 
 	result, err := Find(context.Background(), localSearchFS{cwd: root}, FindOptions{

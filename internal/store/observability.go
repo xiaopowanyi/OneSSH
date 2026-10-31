@@ -13,6 +13,23 @@ import (
 // token 条件每项占 3 个变量；三个维度各 100 项时总计不超过 500。
 const MaxAuditFilterValues = 100
 
+// AuditRetention 是审计记录的保留时长。审计是安全追溯的主要依据，保留期刻意长于
+// 指标、命令输出与 artifact（均为 7 天）。在此之上刻意不提供「永不过期」选项：
+// 审计表每次 MCP 调用都会写入，没有上界时会一直增长到拖垮整个数据目录。
+const AuditRetention = 90 * 24 * time.Hour
+
+// CleanupAudit 删除保留期之前的审计记录并返回删除行数。audit_ts 索引让这条 DELETE
+// 直接命中时间范围，不会变成全表扫描。
+func (s *Store) CleanupAudit(ctx context.Context, cutoff int64) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM audit WHERE ts<?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) AddAudit(ctx context.Context, a Audit) error {
 	var runIDs any
 	if len(a.RunIDs) > 0 {

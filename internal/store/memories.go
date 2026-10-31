@@ -50,6 +50,34 @@ func (s *Store) GetMemory(ctx context.Context, id int64) (Memory, error) {
 	return scanMemory(s.DB.QueryRowContext(ctx, `SELECT `+memoryColumns+` FROM memories WHERE id=?`, id))
 }
 
+// GetMemoriesByIDs 批量取回记忆。召回时用它替代逐个 GetMemory：候选上限是 candidateLimit，
+// 逐条查询会让一次召回产生数十次数据库往返。已被删除的 ID 直接缺席，不算错误。
+func (s *Store) GetMemoriesByIDs(ctx context.Context, ids []int64) ([]Memory, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(ids))
+	marks := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		marks = append(marks, "?")
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memories WHERE id IN (`+strings.Join(marks, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Memory, 0, len(ids))
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpdateMemory(ctx context.Context, m Memory) error {
 	result, err := s.DB.ExecContext(ctx, `UPDATE memories SET content=?,importance=?,veracity=?,updated_at=?,embedding=?,embedding_model=? WHERE id=?`,
 		m.Content, m.Importance, m.Veracity, m.UpdatedAt, m.Embedding, m.EmbeddingModel, m.ID)

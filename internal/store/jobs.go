@@ -3,9 +3,17 @@ package store
 import (
 	"context"
 	"database/sql"
+	"sort"
 	"strings"
 	"time"
 )
+
+const JobHistoryPageSize = 100
+
+type JobCursor struct {
+	StartedAt int64  `json:"started_at"`
+	ID        string `json:"id"`
+}
 
 // jobInsert 让新任务以启动时刻作为首次确认时间，失联判定从这里起算。
 const jobInsert = `INSERT INTO jobs(id,host_id,token_id,command,cwd,pid,used_setsid,status,started_at,last_checked_at) VALUES(?,?,?,?,?,?,?,?,?,?)`
@@ -92,6 +100,94 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// ListJobDashboard returns every running job and only the newest terminal jobs.
+// This keeps the frequently polled dashboard bounded while preserving visibility
+// into long-running jobs.
+func (s *Store) ListJobDashboard(ctx context.Context, hostID *int64) ([]Job, error) {
+	runningQuery := `SELECT id,host_id,token_id,command,cwd,pid,used_setsid,status,exit_code,log_bytes,started_at,finished_at FROM jobs WHERE status='running'`
+	runningArgs := []any{}
+	if hostID != nil {
+		runningQuery += ` AND host_id=?`
+		runningArgs = append(runningArgs, *hostID)
+	}
+	runningQuery += ` ORDER BY started_at DESC,id DESC`
+	runningRows, err := s.DB.QueryContext(ctx, runningQuery, runningArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer runningRows.Close()
+	result := make([]Job, 0, JobHistoryPageSize)
+	for runningRows.Next() {
+		j, scanErr := scanJob(runningRows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, j)
+	}
+	if err = runningRows.Err(); err != nil {
+		return nil, err
+	}
+	if err = runningRows.Close(); err != nil {
+		return nil, err
+	}
+
+	terminal, _, err := s.ListJobHistory(ctx, hostID, nil, JobHistoryPageSize)
+	if err != nil {
+		return nil, err
+	}
+	result = append(result, terminal...)
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].StartedAt == result[j].StartedAt {
+			return result[i].ID > result[j].ID
+		}
+		return result[i].StartedAt > result[j].StartedAt
+	})
+	return result, nil
+}
+
+// ListJobHistory returns one keyset-paginated page of terminal jobs. It reads
+// one extra row to determine whether another page is available.
+func (s *Store) ListJobHistory(ctx context.Context, hostID *int64, before *JobCursor, limit int) ([]Job, *JobCursor, error) {
+	if limit <= 0 || limit > JobHistoryPageSize {
+		limit = JobHistoryPageSize
+	}
+	query := `SELECT id,host_id,token_id,command,cwd,pid,used_setsid,status,exit_code,log_bytes,started_at,finished_at FROM jobs WHERE status<>'running'`
+	args := []any{}
+	if hostID != nil {
+		query += ` AND host_id=?`
+		args = append(args, *hostID)
+	}
+	if before != nil {
+		query += ` AND (started_at<? OR (started_at=? AND id<?))`
+		args = append(args, before.StartedAt, before.StartedAt, before.ID)
+	}
+	query += ` ORDER BY started_at DESC,id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	result := make([]Job, 0, limit+1)
+	for rows.Next() {
+		j, scanErr := scanJob(rows)
+		if scanErr != nil {
+			return nil, nil, scanErr
+		}
+		result = append(result, j)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	var next *JobCursor
+	if len(result) > limit {
+		result = result[:limit]
+		last := result[len(result)-1]
+		next = &JobCursor{StartedAt: last.StartedAt, ID: last.ID}
+	}
+	return result, next, nil
 }
 func (s *Store) UpdateJobState(ctx context.Context, id, status string, exitCode *int) error {
 	var code any

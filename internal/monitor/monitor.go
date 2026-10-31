@@ -109,8 +109,14 @@ func (m *Manager) cleanup(ctx context.Context) {
 	if err := m.Store.ExpireCommandRunOutputs(ctx, cutoff.UnixMilli()); err != nil {
 		log.Printf("标记过期命令输出失败: %v", err)
 	}
-	deletable, err := m.Store.DeletableCommandRunOutputIDs(ctx)
-	if err != nil {
+	// 审计此前没有任何保留策略，随时间无界增长；这里沿用同一轮每小时一次的清理节奏。
+	// 它在 PollInterval=0 时照常执行，与上面的过期清理一致。
+	if removed, err := m.Store.CleanupAudit(ctx, time.Now().Add(-store.AuditRetention).UnixMilli()); err != nil {
+		log.Printf("清理过期审计记录失败: %v", err)
+	} else if removed > 0 {
+		log.Printf("已清理 %d 条超过 %v 的审计记录", removed, store.AuditRetention)
+	}
+	if deletable, err := m.Store.DeletableCommandRunOutputIDs(ctx); err != nil {
 		log.Printf("读取待删除的命令记录失败: %v", err)
 	} else if _, err = m.Exec.CleanupCommandOutputs(deletable); err != nil {
 		log.Printf("清理过期命令输出失败: %v", err)
@@ -243,17 +249,18 @@ func parse(hostID int64, text string, prev *CPU) (Snapshot, CPU, error) {
 		v := 100 * (1 - float64(idle)/float64(dt))
 		snap.CPUPct = &v
 	}
-	var total, avail int64
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "MemTotal:") {
-			fmt.Sscanf(line, "MemTotal: %d kB", &total)
-		}
-		if strings.HasPrefix(line, "MemAvailable:") {
-			fmt.Sscanf(line, "MemAvailable: %d kB", &avail)
-		}
+	total, totalOK := memInfoField(text, "MemTotal:")
+	avail, availOK := memInfoField(text, "MemAvailable:")
+	if !availOK || avail <= 0 {
+		// 老内核、BusyBox 与部分容器镜像不导出 MemAvailable。此前直接把 avail 当作 0，
+		// 会让这类主机恒定显示 100% 内存占用并污染历史指标；这里退回经典估算。
+		avail = memInfoFieldSum(text, "MemFree:", "Buffers:", "Cached:")
 	}
-	if total > 0 {
+	if totalOK && total > 0 {
 		used := total - avail
+		if used < 0 {
+			used = 0
+		}
 		snap.MemTotalKB = &total
 		snap.MemUsedKB = &used
 	}
@@ -275,6 +282,38 @@ func parse(hostID int64, text string, prev *CPU) (Snapshot, CPU, error) {
 	}
 	return snap, cpu, nil
 }
+
+// memInfoField 读取 /proc/meminfo 风格的 "<key>  <value> kB" 行并返回最后一次有效取值。
+// 这里刻意不用 fmt.Sscanf：它的错误很容易被忽略，而字段缺失恰恰是常态（老内核、BusyBox、
+// 精简容器镜像）。Sscanf 失败会让变量静默保持 0，把可用内存算成已用。
+func memInfoField(text, key string) (int64, bool) {
+	var value int64
+	found := false
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if v, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+			value, found = v, true
+		}
+	}
+	return value, found
+}
+
+func memInfoFieldSum(text string, keys ...string) int64 {
+	var sum int64
+	for _, key := range keys {
+		if v, ok := memInfoField(text, key); ok {
+			sum += v
+		}
+	}
+	return sum
+}
+
 func parseCPU(text string) CPU {
 	for _, line := range strings.Split(text, "\n") {
 		f := strings.Fields(line)

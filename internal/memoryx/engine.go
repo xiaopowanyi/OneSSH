@@ -222,18 +222,26 @@ func (e *Engine) Recall(ctx context.Context, hostID sql.NullInt64, includeGlobal
 			if len(dense) > candidateLimit {
 				dense = dense[:candidateLimit]
 			}
+			// 先把 FTS 没覆盖到的候选一次取回，避免逐个 GetMemory 的 N+1 往返。
+			missing := make([]int64, 0, len(dense))
+			for _, item := range dense {
+				if _, ok := candidates[item.id]; !ok {
+					missing = append(missing, item.id)
+				}
+			}
+			fetched, err := e.store.GetMemoriesByIDs(ctx, missing)
+			if err != nil {
+				return nil, "hybrid", err
+			}
+			for i := range fetched {
+				memory := fetched[i]
+				candidates[memory.ID] = &recallCandidate{memory: memory}
+			}
 			for _, item := range dense {
 				candidate := candidates[item.id]
 				if candidate == nil {
-					memory, err := e.store.GetMemory(ctx, item.id)
-					if err != nil {
-						if errors.Is(err, sql.ErrNoRows) {
-							continue
-						}
-						return nil, "hybrid", err
-					}
-					candidate = &recallCandidate{memory: memory}
-					candidates[item.id] = candidate
+					// 恰好在本次查询与召回之间被遗忘，安静跳过即可。
+					continue
 				}
 				candidate.dense = item.score
 			}

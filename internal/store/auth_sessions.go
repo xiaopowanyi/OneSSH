@@ -167,6 +167,43 @@ func (s *Store) ListTokens(ctx context.Context) ([]Token, error) {
 	return out, rows.Err()
 }
 
+type TokenWithHosts struct {
+	Token   Token
+	HostIDs []int64
+}
+
+func (s *Store) ListTokensWithHosts(ctx context.Context) ([]TokenWithHosts, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT t.id,t.name,t.all_hosts,t.manage_hosts,t.disabled_tools_json,t.source,t.created_at,t.last_used_at,t.expires_at,t.resource,t.client_id,th.host_id
+		FROM tokens t LEFT JOIN token_hosts th ON th.token_id=t.id ORDER BY t.name,th.host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TokenWithHosts, 0)
+	for rows.Next() {
+		var token Token
+		var all, manage int
+		var disabledJSON string
+		var hostID sql.NullInt64
+		if err := rows.Scan(&token.ID, &token.Name, &all, &manage, &disabledJSON, &token.Source, &token.CreatedAt, &token.LastUsedAt, &token.ExpiresAt, &token.Resource, &token.ClientID, &hostID); err != nil {
+			return nil, err
+		}
+		token.AllHosts = all != 0
+		token.ManageHosts = manage != 0
+		token.DisabledTools, err = decodeDisabledTools(disabledJSON)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) == 0 || out[len(out)-1].Token.ID != token.ID {
+			out = append(out, TokenWithHosts{Token: token, HostIDs: make([]int64, 0)})
+		}
+		if hostID.Valid {
+			out[len(out)-1].HostIDs = append(out[len(out)-1].HostIDs, hostID.Int64)
+		}
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpdateToken(ctx context.Context, id int64, in TokenUpdate) (Token, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -222,6 +259,7 @@ func (s *Store) GetToken(ctx context.Context, id int64) (Token, error) {
 	t.DisabledTools, err = decodeDisabledTools(disabledJSON)
 	return t, err
 }
+
 func (s *Store) DeleteToken(ctx context.Context, id int64) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
