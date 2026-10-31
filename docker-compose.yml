@@ -1,6 +1,6 @@
 services:
   onessh:
-    image: ghcr.io/lynricsy/onessh:latest
+    image: ghcr.io/xiaopowanyi/onessh:latest
     ports:
       - "8866:8866"
     environment:

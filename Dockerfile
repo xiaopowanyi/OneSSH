@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/onessh ./cmd/onessh
 
 FROM alpine:3.22
-LABEL org.opencontainers.image.source="https://github.com/Lynricsy/OneSSH" \
+LABEL org.opencontainers.image.source="https://github.com/xiaopowanyi/OneSSH" \
       org.opencontainers.image.description="Centralized SSH gateway with WebUI and MCP"
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 10001 onessh \

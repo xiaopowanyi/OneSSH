@@ -8,18 +8,18 @@
 
 一个 Go 二进制，同时提供无状态 Streamable HTTP MCP、OAuth 2.1 授权、管理 API、实时活动流和浏览器终端。
 
-[![CI](https://github.com/Lynricsy/OneSSH/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Lynricsy/OneSSH/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Lynricsy/OneSSH?display_name=tag&sort=semver&label=release&color=0d9488)](https://github.com/Lynricsy/OneSSH/releases/latest)
-[![License](https://img.shields.io/github/license/Lynricsy/OneSSH?color=0d9488)](LICENSE)
-[![Go](https://img.shields.io/github/go-mod/go-version/Lynricsy/OneSSH?logo=go&logoColor=white&color=00ADD8)](go.mod)
-[![Code size](https://img.shields.io/github/languages/code-size/Lynricsy/OneSSH?color=64748b)](https://github.com/Lynricsy/OneSSH)
+[![CI](https://github.com/xiaopowanyi/OneSSH/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xiaopowanyi/OneSSH/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/xiaopowanyi/OneSSH?display_name=tag&sort=semver&label=release&color=0d9488)](https://github.com/xiaopowanyi/OneSSH/releases/latest)
+[![License](https://img.shields.io/github/license/xiaopowanyi/OneSSH?color=0d9488)](LICENSE)
+[![Go](https://img.shields.io/github/go-mod/go-version/xiaopowanyi/OneSSH?logo=go&logoColor=white&color=00ADD8)](go.mod)
+[![Code size](https://img.shields.io/github/languages/code-size/xiaopowanyi/OneSSH?color=64748b)](https://github.com/xiaopowanyi/OneSSH)
 
-[![Last commit](https://img.shields.io/github/last-commit/Lynricsy/OneSSH?color=64748b)](https://github.com/Lynricsy/OneSSH/commits/main)
-[![Commit activity](https://img.shields.io/github/commit-activity/m/Lynricsy/OneSSH?color=64748b)](https://github.com/Lynricsy/OneSSH/pulse)
-[![Issues](https://img.shields.io/github/issues/Lynricsy/OneSSH?color=64748b)](https://github.com/Lynricsy/OneSSH/issues)
-[![Stars](https://img.shields.io/github/stars/Lynricsy/OneSSH?style=flat&label=stars&color=f59e0b)](https://github.com/Lynricsy/OneSSH/stargazers)
+[![Last commit](https://img.shields.io/github/last-commit/xiaopowanyi/OneSSH?color=64748b)](https://github.com/xiaopowanyi/OneSSH/commits/main)
+[![Commit activity](https://img.shields.io/github/commit-activity/m/xiaopowanyi/OneSSH?color=64748b)](https://github.com/xiaopowanyi/OneSSH/pulse)
+[![Issues](https://img.shields.io/github/issues/xiaopowanyi/OneSSH?color=64748b)](https://github.com/xiaopowanyi/OneSSH/issues)
+[![Stars](https://img.shields.io/github/stars/xiaopowanyi/OneSSH?style=flat&label=stars&color=f59e0b)](https://github.com/xiaopowanyi/OneSSH/stargazers)
 
-[![GHCR](https://img.shields.io/badge/ghcr.io-lynricsy%2Fonessh-2dd4bf?logo=docker&logoColor=white)](https://github.com/Lynricsy/OneSSH/pkgs/container/onessh)
+[![GHCR](https://img.shields.io/badge/ghcr.io-xiaopowanyi%2Fonessh-2dd4bf?logo=docker&logoColor=white)](https://github.com/xiaopowanyi/OneSSH/pkgs/container/onessh)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-0d9488)](#mcp-接入)
 [![OAuth](https://img.shields.io/badge/OAuth-2.1%20%2B%20S256%20PKCE-0d9488)](#两种凭据)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20FreeBSD-334155)](#本地开发)
@@ -51,7 +51,7 @@ docker compose up -d
 curl --fail http://localhost:8866/healthz
 ```
 
-默认的 `docker-compose.yml` 会直接拉取 `ghcr.io/lynricsy/onessh:latest`，无需在部署机器上构建镜像。
+默认的 `docker-compose.yml` 会直接拉取 `ghcr.io/xiaopowanyi/onessh:latest`，无需在部署机器上构建镜像。
 
 打开 <http://localhost:8866/>，然后：
 
@@ -433,7 +433,7 @@ docker compose up -d
 也可以直接从 GHCR 拉取镜像：
 
 ```sh
-docker pull ghcr.io/lynricsy/onessh:latest
+docker pull ghcr.io/xiaopowanyi/onessh:latest
 ```
 
 每次正式发布会在 GHCR 更新 Git 标签、`sha-<commit>` 和 `latest` 三类镜像标签；分支名不再作为镜像标签发布。
@@ -480,7 +480,7 @@ docker pull ghcr.io/lynricsy/onessh:latest
 
 <div align="center">
 
-<a href="https://github.com/Lynricsy/OneSSH/stargazers">
+<a href="https://github.com/xiaopowanyi/OneSSH/stargazers">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset=".github/assets/star-history-dark.svg" />
     <source media="(prefers-color-scheme: light)" srcset=".github/assets/star-history-light.svg" />
