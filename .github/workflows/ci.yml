@@ -22,6 +22,7 @@ jobs:
   backend:
     name: Go checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -65,6 +66,7 @@ jobs:
   compatibility:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +100,7 @@ jobs:
   windows:
     name: Windows ${{ matrix.goarch }} native
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -204,6 +207,7 @@ jobs:
   frontend:
     name: Web checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: web
@@ -234,6 +238,7 @@ jobs:
   e2e:
     name: Docker end-to-end
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       ONESSH_MASTER_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       ONESSH_ADMIN_PASSWORD: test123
@@ -283,6 +288,7 @@ jobs:
       - compatibility
       - windows
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -346,6 +352,7 @@ jobs:
     needs:
       - prepare-release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -378,6 +385,7 @@ jobs:
     needs:
       - stage-release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -470,6 +478,7 @@ jobs:
     needs:
       - publish
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:

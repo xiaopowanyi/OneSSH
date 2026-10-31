@@ -2,6 +2,43 @@
 
 本文件记录 OneSSH 的重要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [未发布]
+
+### 修复
+
+- **exec 超时路径的输出竞争**：`execx` 在超时或取消分支调用 `terminateSession` 后没有等待 `session.Wait()` 就去读取输出缓冲，而 x/crypto/ssh 为 stdout / stderr 起的拷贝 goroutine 此时可能仍在写入。现在会等待 Wait 返回（3 秒宽限兜底），并且 `limitedWriter` 的所有字段访问都加锁——两者共同保证不会读到撕裂的输出。
+- **浏览器终端丢弃远端 stderr**：`session.Stderr = session.Stdout` 是无效赋值——`StdoutPipe()` 并不会给 `session.Stdout` 赋值，实际赋的是 `nil`，随后被换成 `io.Discard`。改用 `StderrPipe()` 独立转发，并给两个读取 goroutine 之间的 WebSocket 写入加互斥（`coder/websocket` 不允许并发 Write）。
+- **内存指标在部分内核上恒显 100%**：`fmt.Sscanf` 的返回值被忽略，主机不导出 `MemAvailable` 时可用内存被当作 0。现在检查解析结果，缺失时回退到 `MemFree + Buffers + Cached`。
+- **没有优雅停机**：`ListenAndServe` 一旦被信号终止，所有 `defer` 都不执行，SQLite 来不及 checkpoint、SSH 连接被粗暴断开。改为 `signal.NotifyContext` + `Shutdown`（15 秒宽限，超时强制关监听），并按「后台轮询 → 连接池 → 数据库」的顺序收尾。
+- **`journal_mode=WAL` 不再静默降级**：改为读回实际值校验，文件系统不支持时打印告警，而不是让后续 `wal_checkpoint` 一直失败。
+- **静态资源的 Content-Type 不再受宿主环境影响**：此前一律走 `mime.TypeByExtension`，而它在 Windows 上会读注册表 `HKEY_CLASSES_ROOT\<ext>\Content Type`，很多机器上 `.js` 缺失或被编辑器/脚本宿主改成 `text/plain`。浏览器对 `<script type="module">` 强制严格 MIME 检查，收到错误类型会拒绝执行模块脚本并整页白屏。现在 js / mjs / css / html / json / svg / wasm 及常见图片字体类型写死，其余才回退到系统表。
+- **Range 与 gzip 不再叠加**：`http.ServeContent` 会对已压缩的字节流做范围切片，切出来的片段缺少完整的 gzip 头与尾部 CRC，客户端解压会报流损坏。带 `Range` 的请求现在直接返回未压缩的原始字节。
+- **SFTP 客户端重建失败时清理旧条目**：旧客户端关闭后未从池中摘除，`NewClient` 失败会让池里留着一个已关闭的条目，导致后续请求反复重建。
+- **数据库缺列不再永久不可用**：迁移只按 `schema_migrations` 中的版本号跳过，一旦某条 DDL 被记为已应用却没真正生效（脚本为空、WAL 丢失、旧库文件回滚等），那个库就再也不会被补回来，运行时所有引用该列的查询都会以 `no such column` 失败——令牌列表与新增令牌都会报错。现在启动时按实际表结构对账，缺失则补建 `tokens` / `oauth_authorization_codes` / `oauth_refresh_tokens` 的 `disabled_tools_json`；迁移 13 本身也改为逐表判列后再 `ALTER`，不会因重复执行而让启动失败。
+
+- 数据库启动自检：按实际表结构对账运行时强依赖的列，缺失则补建并记录日志。只做加法，且容忍多实例同时启动时的 `duplicate column name` 竞争。
+
+### 新增
+
+- 数据库迁移 `0017_performance_indexes.sql`：补齐 `audit(token_id|host)`、`jobs(host_id)`、`oauth_refresh_tokens(access_token_id)` 以及 `command_runs` 的两个部分索引。前两项让审计页的筛选不必逐条倒扫主键，后两项缩短删除主机时写事务的持锁时间。
+- **审计保留策略**：审计记录此前只增不减，现在按 90 天保留，随每小时的过期清理一起执行。审计是安全追溯的主要依据，保留期刻意长于指标与命令输出（均为 7 天）。
+- 前端增加路由级错误边界：懒加载 chunk 失败或渲染抛错时给出「重试 / 刷新」界面，而不是整棵树卸载成白屏。
+
+### 优化
+
+- 连接池拨号不再占用 entry 锁：主机信息查询与最长 15 秒的 SSH 握手移到锁外，`IsOnline` / `Invalidate` 不再被慢主机阻塞；拨号完成后比对 generation，避免把握手期间已被作废的连接登记进池。`IsOnline` 改为只读查找，不再为任意主机名凭空创建 entry。
+- keepalive 应答加 10 秒期限：`SendRequest(wantReply=true)` 在网络被静默丢弃时会永久挂住，导致僵尸连接既不被判死也无人回收。超时后主动关闭连接，既立即判定失效，也让阻塞的 goroutine 带错误退出。
+- SFTP 客户端改为按主机加锁：建立 SFTP 客户端要跨网络握手，此前一把全局锁会让一台慢主机串行走完整个网关的文件操作。
+- exec 输出缓冲的重复拷贝：tail 达到上限后改为原地丢弃头部，不再每次 Write 重新分配并整体拷贝 128 KiB；合并 stdout / stderr 时一次分配到位。
+- 记忆召回的 N+1：混合召回对 FTS 未覆盖的候选原本逐个 `GetMemory`，现在用一条 `WHERE id IN (...)` 批量取回。
+
+### 变更
+
+- **Dockerfile 以非 root 运行**（uid/gid 10001）并新增 `HEALTHCHECK`。使用 bind mount 挂载 `/data` 的既有部署，升级前需确认宿主机目录对 uid 10001 可写；使用命名卷的部署不受影响。
+- 静态资源支持 gzip（结果按路径缓存在内存中，图片与 woff2 等已压缩格式跳过）与带内容哈希产物的长效缓存；`index.html` 仍为 `no-cache`，保证发版后浏览器不会停在旧入口。
+- CI 各 job 增加 30 分钟超时，避免异常时无限占用 runner。
+- `.gitignore` 补充 `/onessh.exe` 与 `/dist/`，以及 `.idea/`、`.vscode/`、`.workbuddy/` 等本地目录（注意 `web/dist/` 是 `go:embed` 的组成部分，仍然入库）。
+
 ## [0.1.20] - 2026-10-25
 
 ### 新增
