@@ -14,6 +14,8 @@ import type {
   FileEntry,
   Host,
   HostPayload,
+  JobHistoryCursor,
+  JobHistoryPage,
   JobStatus,
   KeyPayload,
   MemoryBankStat,
@@ -117,6 +119,23 @@ export const useJobs = () =>
     queryKey: queryKeys.jobs,
     queryFn: () => api<JobStatus[]>('/jobs'),
     refetchInterval: 4000,
+  })
+
+export const useJobHistory = (initialBefore: JobHistoryCursor | null) =>
+  useInfiniteQuery({
+    queryKey: [...queryKeys.jobs, 'history', initialBefore?.started_at ?? 0, initialBefore?.id ?? ''],
+    queryFn: ({ pageParam }) => {
+      if (!pageParam) return Promise.resolve<JobHistoryPage>({ items: [], next_before: null })
+      const params = new URLSearchParams({
+        before_ts: String(pageParam.started_at),
+        before_id: pageParam.id,
+      })
+      return api<JobHistoryPage>(`/jobs/history?${params}`)
+    },
+    initialPageParam: initialBefore,
+    getNextPageParam: (last) => last.next_before ?? undefined,
+    enabled: initialBefore !== null,
+    retry: false,
   })
 
 export const useJobLogs = (id: string, running: boolean) =>

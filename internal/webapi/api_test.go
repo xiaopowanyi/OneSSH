@@ -2,8 +2,11 @@ package webapi
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
 	"onessh/internal/cryptox"
 	"onessh/internal/execx"
 	"onessh/internal/hostmanager"
@@ -250,6 +254,130 @@ func TestCommandRunListDetailAndOutput(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/command-runs/"+id+"/output?stream=combined", nil))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("非法输出流状态码 = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestImportKeyWithPassphrase(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	box, err := cryptox.New(bytes.Repeat([]byte{8}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := sshpool.New(st, box)
+	defer pool.Close()
+	hosts := hostmanager.New(st, box, pool)
+	api := NewAPI(st, box, pool, hosts, nil, nil, nil, nil, memoryx.New(st, memoryx.EmbeddingConfig{}), nil).Handler()
+
+	// 1. Generate an unencrypted key and test import
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "test-import")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privPEM := string(pem.EncodeToMemory(block))
+
+	// Test importing unencrypted key
+	body, _ := json.Marshal(map[string]string{
+		"name":        "my-unencrypted-key",
+		"mode":        "import",
+		"private_key": privPEM,
+	})
+	r := httptest.NewRequest(http.MethodPost, "/keys", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("导入无密码私钥失败: %d %s", w.Code, w.Body.String())
+	}
+
+	// 2. Generate a passphrase-protected key
+	encBlock, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "test-enc", []byte("secret123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encPEM := string(pem.EncodeToMemory(encBlock))
+
+	// Test importing encrypted key WITHOUT passphrase - should fail with clear message
+	bodyMissing, _ := json.Marshal(map[string]string{
+		"name":        "my-enc-key-missing",
+		"mode":        "import",
+		"private_key": encPEM,
+	})
+	rMissing := httptest.NewRequest(http.MethodPost, "/keys", bytes.NewReader(bodyMissing))
+	rMissing.Header.Set("Content-Type", "application/json")
+	wMissing := httptest.NewRecorder()
+	api.ServeHTTP(wMissing, rMissing)
+	if wMissing.Code != http.StatusBadRequest {
+		t.Fatalf("未提供密码导入受保护私钥应返回 400，得到: %d %s", wMissing.Code, wMissing.Body.String())
+	}
+	if !strings.Contains(wMissing.Body.String(), "私钥受密码保护") {
+		t.Fatalf("未包含友好提示: %s", wMissing.Body.String())
+	}
+
+	// Test importing encrypted key WITH WRONG passphrase - should fail
+	bodyWrong, _ := json.Marshal(map[string]string{
+		"name":        "my-enc-key-wrong",
+		"mode":        "import",
+		"private_key": encPEM,
+		"passphrase":  "wrongpassword",
+	})
+	rWrong := httptest.NewRequest(http.MethodPost, "/keys", bytes.NewReader(bodyWrong))
+	rWrong.Header.Set("Content-Type", "application/json")
+	wWrong := httptest.NewRecorder()
+	api.ServeHTTP(wWrong, rWrong)
+	if wWrong.Code != http.StatusBadRequest {
+		t.Fatalf("错误密码导入应返回 400，得到: %d %s", wWrong.Code, wWrong.Body.String())
+	}
+
+	// Test importing encrypted key WITH CORRECT passphrase - should succeed
+	bodyCorrect, _ := json.Marshal(map[string]string{
+		"name":        "my-enc-key-correct",
+		"mode":        "import",
+		"private_key": encPEM,
+		"passphrase":  "secret123",
+	})
+	rCorrect := httptest.NewRequest(http.MethodPost, "/keys", bytes.NewReader(bodyCorrect))
+	rCorrect.Header.Set("Content-Type", "application/json")
+	wCorrect := httptest.NewRecorder()
+	api.ServeHTTP(wCorrect, rCorrect)
+	if wCorrect.Code != http.StatusCreated {
+		t.Fatalf("正确密码导入受保护私钥失败: %d %s", wCorrect.Code, wCorrect.Body.String())
+	}
+
+	// Verify key in store can be decrypted without passphrase by sshpool
+	keys, err := st.ListKeys(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundKey *store.Key
+	for i := range keys {
+		if keys[i].Name == "my-enc-key-correct" {
+			foundKey = &keys[i]
+			break
+		}
+	}
+	if foundKey == nil {
+		t.Fatal("未找到导入的密钥")
+	}
+	fullKey, err := st.GetKey(t.Context(), foundKey.ID)
+	if err != nil {
+		t.Fatalf("GetKey 失败: %v", err)
+	}
+	plainKey, err := box.Open(fullKey.PrivateKeyEnc)
+	if err != nil {
+		t.Fatalf("解密落库私钥失败: %v", err)
+	}
+	// Verify it can be parsed directly without passphrase (as sshpool does)
+	_, err = ssh.ParsePrivateKey(plainKey)
+	if err != nil {
+		t.Fatalf("sshpool 无密码解析私钥失败: %v", err)
 	}
 }
 

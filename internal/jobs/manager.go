@@ -28,6 +28,9 @@ type Manager struct {
 	// cancel 停止 Start 启动的后台维护循环。
 	cancel context.CancelFunc
 }
+
+const maxConcurrentJobRefresh = 5
+
 type JobView struct {
 	ID         string `json:"id"`
 	HostID     int64  `json:"host_id"`
@@ -88,6 +91,8 @@ func view(j store.Job) JobView {
 	}
 	return out
 }
+
+func ViewJob(j store.Job) JobView { return view(j) }
 
 func New(st *store.Store, p *sshpool.Pool, e *execx.Runner, b *events.Bus) *Manager {
 	return &Manager{Store: st, Pool: p, Exec: e, Events: b}
@@ -387,6 +392,159 @@ else printf 'lost::'; wc -c 2>/dev/null < "$d/out.log" || echo 0; fi`
 	}
 	return Status{Job: view(j), LogBytes: size}, nil
 }
+
+// RefreshMany checks running jobs with one SSH command per host. Terminal jobs
+// are returned from the database snapshot without another remote round trip.
+func (m *Manager) RefreshMany(ctx context.Context, list []store.Job) []Status {
+	byHost := make(map[int64][]store.Job)
+	for _, j := range list {
+		if j.Status == "running" {
+			byHost[j.HostID] = append(byHost[j.HostID], j)
+		}
+	}
+
+	statuses := make(map[string]Status, len(list))
+	for _, j := range list {
+		if j.Status != "running" {
+			statuses[j.ID] = Status{Job: view(j), LogBytes: j.LogBytes}
+		}
+	}
+	type hostBatch struct {
+		hostID int64
+		jobs   []store.Job
+	}
+	batches := make(chan hostBatch)
+	results := make(chan map[string]Status, len(byHost))
+	workerCount := min(maxConcurrentJobRefresh, len(byHost))
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for batch := range batches {
+				results <- m.refreshHostJobs(ctx, batch.hostID, batch.jobs)
+			}
+		}()
+	}
+	go func() {
+		defer close(batches)
+		for hostID, hostJobs := range byHost {
+			select {
+			case batches <- hostBatch{hostID: hostID, jobs: hostJobs}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	for batchStatuses := range results {
+		for id, status := range batchStatuses {
+			statuses[id] = status
+		}
+	}
+
+	out := make([]Status, 0, len(list))
+	for _, j := range list {
+		if status, ok := statuses[j.ID]; ok {
+			out = append(out, status)
+		} else {
+			out = append(out, Status{Job: view(j), LogBytes: j.LogBytes})
+		}
+	}
+	return out
+}
+
+func (m *Manager) refreshHostJobs(ctx context.Context, hostID int64, jobs []store.Job) map[string]Status {
+	stale := make(map[string]Status, len(jobs))
+	for _, j := range jobs {
+		stale[j.ID] = Status{Job: view(j), LogBytes: j.LogBytes}
+	}
+	host, err := m.Store.GetHost(ctx, hostID)
+	if err != nil {
+		return stale
+	}
+	client, err := m.Pool.Get(ctx, host.Name)
+	if err != nil {
+		return stale
+	}
+
+	var script strings.Builder
+	for _, j := range jobs {
+		quotedID := execx.SHQ(j.ID)
+		script.WriteString("printf '%s:' ")
+		script.WriteString(quotedID)
+		script.WriteString("; d=\"$HOME/.onessh/jobs/\"")
+		script.WriteString(quotedID)
+		script.WriteString("; ")
+		script.WriteString(jobProcessIdentityScript(j))
+		script.WriteString(`
+if [ -f "$d/exit" ]; then printf 'exited:'; tr -d '\n' < "$d/exit"; printf ':'; wc -c < "$d/out.log";
+elif alive && owned; then printf 'running::'; wc -c < "$d/out.log";
+else printf 'lost::'; wc -c 2>/dev/null < "$d/out.log" || echo 0; fi
+`)
+	}
+	result, err := m.Exec.Run(ctx, client, script.String(), "~", nil, execx.Options{Timeout: 15 * time.Second, MaxLines: len(jobs) + 5})
+	if err != nil {
+		return stale
+	}
+	jobByID := make(map[string]store.Job, len(jobs))
+	for _, j := range jobs {
+		jobByID[j.ID] = j
+	}
+	updated := make(map[string]Status, len(jobs))
+	for _, line := range strings.Split(strings.TrimSpace(result.Output), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		j, ok := jobByID[parts[0]]
+		if !ok {
+			continue
+		}
+		status := parts[1]
+		if status != "running" && status != "exited" && status != "lost" {
+			continue
+		}
+		size, parseErr := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		var code *int
+		if status == "exited" {
+			value, parseErr := strconv.Atoi(strings.TrimSpace(parts[2]))
+			if parseErr != nil {
+				continue
+			}
+			code = &value
+		}
+		if size != j.LogBytes {
+			_ = m.Store.UpdateJobLogBytes(context.Background(), j.ID, size)
+			_ = m.Store.UpdateCommandRunJobBytes(context.Background(), j.ID, size)
+		}
+		j.LogBytes = size
+		if status != j.Status {
+			_ = m.Store.UpdateJobState(context.Background(), j.ID, status, code)
+			j.Status = status
+			if code != nil {
+				j.ExitCode = sql.NullInt64{Int64: int64(*code), Valid: true}
+			}
+			if status != "running" {
+				j.FinishedAt = sql.NullInt64{Int64: time.Now().Unix(), Valid: true}
+			}
+			m.Events.Publish("job_status", map[string]any{"job_id": j.ID, "status": status})
+			m.syncCommandRun(j, code)
+		}
+		updated[j.ID] = Status{Job: view(j), LogBytes: size}
+	}
+	for id, status := range updated {
+		stale[id] = status
+	}
+	return stale
+}
+
 func (m *Manager) Logs(ctx context.Context, j store.Job, tailLines int, pattern string, offset int64) (string, error) {
 	h, err := m.Store.GetHost(ctx, j.HostID)
 	if err != nil {

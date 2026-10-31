@@ -55,6 +55,12 @@ export type JobStatus = {
   refresh_error?: string
 }
 
+export type JobHistoryCursor = { started_at: number; id: string }
+export type JobHistoryPage = {
+  items: JobStatus[]
+  next_before: JobHistoryCursor | null
+}
+
 export type Metric = {
   host_id: number
   ts: number
@@ -183,6 +189,7 @@ export type KeyPayload = {
   name: string
   mode: 'generate' | 'import'
   private_key?: string
+  passphrase?: string
 }
 
 export type TokenPayload = {

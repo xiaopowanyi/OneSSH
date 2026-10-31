@@ -1,9 +1,9 @@
 import { ArrowClockwise, ArrowDown, Broadcast, FileText, WarningCircle } from '@phosphor-icons/react'
 import { animate, motion, useMotionValue, useReducedMotion } from 'motion/react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useJobLogs, useJobs, useKillJob, useKillJobs } from '@/api/queries'
-import type { JobStatus } from '@/api/types'
+import { useJobHistory, useJobLogs, useJobs, useKillJob, useKillJobs } from '@/api/queries'
+import type { JobHistoryCursor, JobStatus } from '@/api/types'
 import { ConfirmDialog } from '@/components/ui/alert-dialog'
 import { Badge, Dot } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -96,6 +96,8 @@ function JobLogs({ job }: { job: JobStatus }) {
 
 export function JobsPage() {
   const jobs = useJobs()
+  const [historyStart, setHistoryStart] = useState<JobHistoryCursor | null>(null)
+  const history = useJobHistory(historyStart)
   const killJob = useKillJob()
   const killJobs = useKillJobs()
   const navigate = useNavigate()
@@ -108,10 +110,43 @@ export function JobsPage() {
   const fetching = useRef(false)
   const spinning = useRef(false)
 
+  const rows = useMemo(() => {
+    const byID = new Map<string, JobStatus>()
+    for (const item of jobs.data ?? []) byID.set(item.job.id, item)
+    for (const page of history.data?.pages ?? []) {
+      for (const item of page.items) {
+        if (!byID.has(item.job.id)) byID.set(item.job.id, item)
+      }
+    }
+    return [...byID.values()].sort((a, b) => {
+      if (a.job.started_at === b.job.started_at) return b.job.id.localeCompare(a.job.id)
+      return b.job.started_at - a.job.started_at
+    })
+  }, [jobs.data, history.data])
+
+  const latestTerminal = (jobs.data ?? []).filter((item) => item.job.status !== 'running')
+  const canStartHistory = historyStart === null && latestTerminal.length >= 100
+  const showMoreHistory =
+    canStartHistory ||
+    history.hasNextPage ||
+    (historyStart !== null && (history.isLoading || history.isError))
+
+  const loadMoreHistory = () => {
+    if (historyStart === null) {
+      const oldest = latestTerminal[latestTerminal.length - 1]
+      if (oldest) setHistoryStart({ started_at: oldest.job.started_at, id: oldest.job.id })
+      return
+    }
+    if (history.isError) {
+      void history.refetch()
+      return
+    }
+    if (history.hasNextPage) void history.fetchNextPage()
+  }
+
   // 列表每 4 秒轮询：已退出/被终止的任务留在选中态只会误导下一次批量终止，随数据自动剔除
   useEffect(() => {
-    const rows = jobs.data
-    if (!rows) return
+    if (!jobs.data) return
     setSelected((prev) => {
       if (prev.size === 0) return prev
       // 只剔除「响应里确实存在且已不再 running」的任务。反过来按 running 白名单过滤的话，
@@ -123,7 +158,7 @@ export function JobsPage() {
       const next = new Set([...prev].filter((id) => !settled.has(id)))
       return next.size === prev.size ? prev : next
     })
-  }, [jobs.data])
+  }, [jobs.data, rows])
 
   /**
    * 本地网关常在几十毫秒内返回：把 isFetching 直接绑到 animate-spin 只会让图标抖一下，
@@ -200,7 +235,7 @@ export function JobsPage() {
     },
   ]
 
-  const isEmpty = !jobs.isLoading && jobs.data?.length === 0
+  const isEmpty = !jobs.isLoading && rows.length === 0
 
   return (
     <PageTransition>
@@ -251,7 +286,7 @@ export function JobsPage() {
           <Card className="hidden overflow-hidden md:block">
             <DataTable
               columns={columns}
-              rows={jobs.data}
+              rows={rows}
               rowKey={(item) => item.job.id}
               loading={jobs.isLoading}
               selection={{
@@ -266,7 +301,7 @@ export function JobsPage() {
           <div className="space-y-3 md:hidden">
             {jobs.isLoading
               ? Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-[116px]" />)
-              : jobs.data?.map((item) => (
+              : rows.map((item) => (
                   <Card
                     key={item.job.id}
                     className={cn('p-4', selected.has(item.job.id) && 'border-accent')}
@@ -314,6 +349,25 @@ export function JobsPage() {
         </>
       )}
 
+      {showMoreHistory && !jobs.isError && (
+        <div className="flex justify-center">
+          <Button
+            variant="outline"
+            loading={history.isFetching}
+            disabled={
+              historyStart !== null &&
+              !history.hasNextPage &&
+              !history.isLoading &&
+              !history.isError
+            }
+            onClick={loadMoreHistory}
+          >
+            <ArrowDown size={14} />
+            {history.isError ? '重试加载历史任务' : '加载更早任务'}
+          </Button>
+        </div>
+      )}
+
       <SelectionBar count={selected.size} onClear={() => setSelected(new Set())}>
         <Button variant="danger" size="sm" onClick={() => setBatchConfirm(true)}>
           终止
@@ -333,7 +387,7 @@ export function JobsPage() {
           <JobLogs
             job={
               // 列表可能已刷新掉这条任务，用只带 id 的占位记录兜底：日志按 job_id 拉取，与它是否还在列表里无关
-              jobs.data.find((item) => item.job.id === logsJobId) ?? {
+              rows.find((item) => item.job.id === logsJobId) ?? {
                 job: {
                   id: logsJobId,
                   host_id: 0,

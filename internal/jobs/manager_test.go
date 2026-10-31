@@ -46,6 +46,9 @@ func TestSyncCommandRunFromFinishedJob(t *testing.T) {
 }
 
 func TestTrackedJobCommandRecordsExplicitExit(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("缺少 sh，跳过测试")
+	}
 	dir := t.TempDir()
 	script := `d=` + execx.SHQ(dir) + `; export d; ` + trackedJobCommand("exit 7")
 	result := exec.Command("sh", "-c", script)
