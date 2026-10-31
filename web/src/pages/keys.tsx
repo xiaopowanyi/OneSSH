@@ -27,12 +27,14 @@ type KeyFormValues = {
   name: string
   mode: KeyPayload['mode']
   private_key: string
+  passphrase?: string
 }
 
 const defaultValues: KeyFormValues = {
   name: '',
   mode: 'generate',
   private_key: '',
+  passphrase: '',
 }
 
 export function KeysPage() {
@@ -76,6 +78,7 @@ export function KeysPage() {
       name: values.name,
       mode: values.mode,
       private_key: values.mode === 'import' ? values.private_key : undefined,
+      passphrase: values.mode === 'import' && values.passphrase ? values.passphrase : undefined,
     })
     setCreateOpen(false)
     reset(defaultValues)
@@ -281,7 +284,7 @@ export function KeysPage() {
                 transition={{ duration: reduceMotion ? 0 : 0.22, ease: 'easeOut' }}
               >
                 {/* 负外边距补回 overflow-hidden 裁掉的焦点环空间，同时保持与上方字段左右对齐 */}
-                <div className="-m-0.5 p-0.5 pt-[18px]">
+                <div className="-m-0.5 space-y-4 p-0.5 pt-[18px]">
                   <Field label="私钥" required error={errors.private_key?.message}>
                     {(id) => (
                       <Textarea
@@ -292,6 +295,21 @@ export function KeysPage() {
                         {...register('private_key', {
                           required: mode === 'import' ? '请输入私钥' : false,
                         })}
+                      />
+                    )}
+                  </Field>
+                  <Field
+                    label="私钥密码 (Passphrase)"
+                    error={errors.passphrase?.message}
+                    hint="若私钥设置了密码请填写，无密码请留空"
+                  >
+                    {(id) => (
+                      <Input
+                        id={id}
+                        type="password"
+                        placeholder="若私钥受密码保护请输入"
+                        autoComplete="off"
+                        {...register('passphrase')}
                       />
                     )}
                   </Field>

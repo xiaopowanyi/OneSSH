@@ -1,0 +1,1 @@
+function e(t){return t<1024?`${t} B`:t<1048576?`${(t/1024).toFixed(1)} KiB`:`${(t/1048576).toFixed(1)} MiB`}function i(t){return new Date(t*1e3).toLocaleString()}function o(t,r=1){return t==null||Number.isNaN(t)?"—":`${t.toFixed(r)}%`}export{o as a,i as b,e as f};
