@@ -20,7 +20,6 @@
 [![Stars](https://img.shields.io/github/stars/Lynricsy/OneSSH?style=flat&label=stars&color=f59e0b)](https://github.com/Lynricsy/OneSSH/stargazers)
 
 [![GHCR](https://img.shields.io/badge/ghcr.io-lynricsy%2Fonessh-2dd4bf?logo=docker&logoColor=white)](https://github.com/Lynricsy/OneSSH/pkgs/container/onessh)
-[![Docker Hub](https://img.shields.io/badge/docker.io-lynricsy%2Fonessh-2dd4bf?logo=docker&logoColor=white)](https://hub.docker.com/r/lynricsy/onessh)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-0d9488)](#mcp-接入)
 [![OAuth](https://img.shields.io/badge/OAuth-2.1%20%2B%20S256%20PKCE-0d9488)](#两种凭据)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20FreeBSD-334155)](#本地开发)
@@ -422,33 +421,27 @@ ONESSH_URL=http://localhost:8866/mcp \
 - **frontend** — 锁定依赖安装、TypeScript 检查、生产构建
 - **e2e** — Docker Compose 四主机端到端（覆盖原生、临时 helper 与 noexec 纯 SFTP 回退）
 
-只有 `v*` 标签的 push 会进入正式发布链路，普通分支 push 只运行检查，不写入任何镜像仓库。发布先独立构建并校验八个平台压缩包与 `checksums.txt`，随后把完整资产上传到隐藏的 GitHub Draft Release；草稿准备成功后，一次构建同时把 `linux/amd64`、`linux/arm64` 镜像推送到 GHCR 与 Docker Hub（两边摘要一致），再分别附加 provenance，最后公开对应的 GitHub Release。两个 Windows 压缩包由对应架构的 Windows runner 原生构建，其余六个平台压缩包由 Linux runner 交叉构建。
+只有 `v*` 标签的 push 会进入正式发布链路，普通分支 push 只运行检查，不写入镜像仓库。发布先独立构建并校验八个平台压缩包与 `checksums.txt`，随后把完整资产上传到隐藏的 GitHub Draft Release；草稿准备成功后，构建 `linux/amd64`、`linux/arm64` 多架构镜像并推送到 GHCR，附加 provenance 后公开 GitHub Release。两个 Windows 压缩包由对应架构的 Windows runner 原生构建，其余六个平台压缩包由 Linux runner 交叉构建。
 
-整条链路没有事务，可能出现部分发布：两个镜像仓库的推送互相独立，可能一边的标签（含 `latest`）已经更新、另一边失败；provenance 在镜像推送之后才附加，它失败时两边镜像都已公开；最后公开 Release 失败时，镜像已更新而 Release 仍是草稿。任何一步失败都不会回滚已公开的镜像，排除原因后重跑整个工作流即可补齐——构建产物按标签重新推送，草稿资产以 `--clobber` 覆盖上传。默认的 `docker-compose.yml` 使用 `latest` 标签；更新部署时先拉取新镜像再重建容器：
+整条链路没有事务，可能出现部分发布：GHCR 镜像推送后附加 provenance 或公开 Release 失败时，镜像可能已更新而 Release 仍是草稿。任何一步失败都不会回滚已公开的镜像，排除原因后重跑整个工作流即可补齐——构建产物按标签重新推送，草稿资产以 `--clobber` 覆盖上传。默认的 `docker-compose.yml` 使用 `latest` 标签；更新部署时先拉取新镜像再重建容器：
 
 ```sh
 docker compose pull
 docker compose up -d
 ```
 
-也可以直接拉取镜像，GHCR 与 Docker Hub 任选其一：
+也可以直接从 GHCR 拉取镜像：
 
 ```sh
 docker pull ghcr.io/lynricsy/onessh:latest
-docker pull lynricsy/onessh:latest
 ```
 
-每次正式发布会在两个仓库同时更新 Git 标签、`sha-<commit>` 和 `latest` 三类镜像标签；分支名不再作为镜像标签发布。
+每次正式发布会在 GHCR 更新 Git 标签、`sha-<commit>` 和 `latest` 三类镜像标签；分支名不再作为镜像标签发布。
 
-**发布凭据**：GHCR 使用仓库自带的 `GITHUB_TOKEN`；Docker Hub 需要在 GitHub 仓库 *Settings → Secrets and variables → Actions* 中配置：
-
-- 变量 `DOCKERHUB_USERNAME` — Docker Hub 用户名，镜像发布为 `<用户名小写>/onessh`
-- Secret `DOCKERHUB_TOKEN` — Docker Hub 个人访问令牌，权限至少为 *Read & Write*
-
-缺少任一项时，发布在推送任何镜像之前就会失败，只留下可重试的草稿 Release。
+**发布凭据**：GHCR 使用 GitHub Actions 自动提供的 `GITHUB_TOKEN`，无需额外配置仓库凭据。
 
 > [!NOTE]
-> GHCR 首次发布的包默认私有。需要匿名拉取的话，要在 GitHub Packages 设置里显式改为公开。Docker Hub 仓库在首次推送时自动创建，可见性取决于账号的默认仓库设置。
+> GHCR 首次发布的包默认私有。需要匿名拉取的话，要在 GitHub Packages 设置里显式改为公开。
 
 ## 数据与安全
 
