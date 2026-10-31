@@ -476,20 +476,6 @@ docker pull ghcr.io/xiaopowanyi/onessh:latest
 
 - [LINUX DO](https://linux.do/)
 
-## Star History
-
-<div align="center">
-
-<a href="https://github.com/xiaopowanyi/OneSSH/stargazers">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/star-history-dark.svg" />
-    <source media="(prefers-color-scheme: light)" srcset=".github/assets/star-history-light.svg" />
-    <img alt="OneSSH Star History" src=".github/assets/star-history-light.svg" width="720" />
-  </picture>
-</a>
-
-</div>
-
 ## 许可证
 
 [GNU General Public License v3.0](LICENSE)。你可以自由使用、修改和分发本项目；分发修改版或基于它的衍生作品时，必须同样以 GPL-3.0 提供完整对应源码。
