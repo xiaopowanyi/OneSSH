@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,10 +23,20 @@ func NewAdminAuth(password string, masterKey []byte) *AdminAuth {
 	return &AdminAuth{password: password, key: sum[:]}
 }
 func (a *AdminAuth) Login(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 	var in struct {
 		Password string `json:"password"`
 	}
-	if json.NewDecoder(r.Body).Decode(&in) != nil || subtle.ConstantTimeCompare([]byte(in.Password), []byte(a.password)) != 1 {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "请求体超过大小限制", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "密码错误", http.StatusUnauthorized)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(in.Password), []byte(a.password)) != 1 {
 		http.Error(w, "密码错误", http.StatusUnauthorized)
 		return
 	}
