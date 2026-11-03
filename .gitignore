@@ -1,6 +1,12 @@
 .agent-logs/
+.idea/
+.vscode/
+.workbuddy/
 web/node_modules/
 /onessh
+/onessh.exe
+/dist/
+/*.zip
 web/*.tsbuildinfo
 web/test-results/
 web/playwright-report/

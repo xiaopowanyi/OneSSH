@@ -1,5 +1,8 @@
 .git
 .agent-logs
 web/node_modules
+/onessh.exe
+/dist/
+/web/dist/
 onessh
 master.key
