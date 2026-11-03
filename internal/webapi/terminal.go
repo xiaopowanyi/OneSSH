@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/coder/websocket"
 )
@@ -56,7 +57,13 @@ func (a *API) terminal(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 502, err)
 		return
 	}
-	session.Stderr = session.Stdout
+	// StdoutPipe 并不会写入 session.Stdout，所以不能拿 session.Stdout 给 Stderr 赋值：
+	// 那样只是赋了一个 nil，随后被换成 io.Discard，远端 stderr 会被静默丢弃。
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		apiError(w, 502, err)
+		return
+	}
 	if err = session.Shell(); err != nil {
 		apiError(w, 502, err)
 		return
@@ -68,25 +75,37 @@ func (a *API) terminal(w http.ResponseWriter, r *http.Request) {
 	defer conn.CloseNow()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
+	// coder/websocket 不允许并发 Write，而 stdout 与 stderr 由两个 goroutine 分别读取，
+	// 这里用一个互斥写操作把它们串行化。
+	var writeMu sync.Mutex
+	write := func(data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.Write(ctx, websocket.MessageBinary, data)
+	}
+	forward := func(read io.Reader) {
 		buf := make([]byte, 4096)
 		for {
-			n, err := stdout.Read(buf)
+			n, err := read.Read(buf)
 			if n > 0 {
-				if conn.Write(ctx, websocket.MessageBinary, buf[:n]) != nil {
+				if write(buf[:n]) != nil {
 					cancel()
 					return
 				}
 			}
 			if err != nil {
 				if err != io.EOF {
+					writeMu.Lock()
 					_ = conn.Close(websocket.StatusInternalError, err.Error())
+					writeMu.Unlock()
 				}
 				cancel()
 				return
 			}
 		}
-	}()
+	}
+	go forward(stdout)
+	go forward(stderr)
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {

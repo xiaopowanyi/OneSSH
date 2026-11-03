@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -153,7 +154,11 @@ func commandScript(command, cwd string, env map[string]string, trailerID string)
 	return b.String()
 }
 
+// limitedWriter 会被 x/crypto/ssh 为 stdout / stderr 各自起的拷贝 goroutine 并发调用 Write，
+// 而 Run 会在 Wait 返回后读取这些字段。两者没有天然的 happens-before 关系（尤其超时路径），
+// 所以所有字段访问都必须经过 mu。
 type limitedWriter struct {
+	mu              sync.Mutex
 	buf             bytes.Buffer
 	tail            []byte
 	limit           int
@@ -172,13 +177,15 @@ type limitedWriter struct {
 
 func (w *limitedWriter) Write(p []byte) (int, error) {
 	original := len(p)
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.full != nil && w.fullErr == nil {
 		if _, err := w.full.Write(p); err != nil {
 			// 记录失败不能反过来打断已经在远端执行的命令；最终结果会明确携带捕获错误。
 			w.fullErr = err
 		}
 	}
-	w.emitCallback(p)
+	w.emitCallbackLocked(p)
 	w.written += original
 	w.newlines += bytes.Count(p, []byte{'\n'})
 	headLimit := (w.limit + 1) / 2
@@ -189,7 +196,10 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 		tailLimit := w.limit - headLimit
 		w.tail = append(w.tail, p[headLen:]...)
 		if len(w.tail) > tailLimit {
-			w.tail = append([]byte(nil), w.tail[len(w.tail)-tailLimit:]...)
+			// 原地丢弃头部，避免每次 Write 都重新分配并整体拷贝 128 KiB 的 tail。
+			excess := len(w.tail) - tailLimit
+			copy(w.tail, w.tail[excess:])
+			w.tail = w.tail[:tailLimit]
 		}
 	}
 	w.truncated = w.written > w.limit
@@ -200,7 +210,7 @@ var legacyTrailerMarker = []byte("\n\x01ONESSH:")
 
 // stdout 最后附有 Runner 自己的退出码/cwd trailer。回调只暂存 marker 长度的尾巴，
 // 既能处理 marker 横跨两个 SSH 数据块，又不会让正常输出产生可感知的延迟。
-func (w *limitedWriter) emitCallback(p []byte) {
+func (w *limitedWriter) emitCallbackLocked(p []byte) {
 	if w.callback == nil || w.callbackStopped {
 		return
 	}
@@ -223,7 +233,9 @@ func (w *limitedWriter) emitCallback(p []byte) {
 	if len(w.callbackPending) > keep {
 		emit := len(w.callbackPending) - keep
 		w.callbackChunks(w.callbackPending[:emit])
-		w.callbackPending = append([]byte(nil), w.callbackPending[emit:]...)
+		rest := len(w.callbackPending) - emit
+		copy(w.callbackPending, w.callbackPending[emit:])
+		w.callbackPending = w.callbackPending[:rest]
 	}
 }
 
@@ -236,6 +248,8 @@ func (w *limitedWriter) callbackChunks(data []byte) {
 }
 
 func (w *limitedWriter) finishCallback() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if !w.callbackStopped {
 		w.callbackChunks(w.callbackPending)
 	}
@@ -243,15 +257,42 @@ func (w *limitedWriter) finishCallback() {
 }
 
 func (w *limitedWriter) captured() []byte {
-	out := append([]byte(nil), w.buf.Bytes()...)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]byte, 0, w.buf.Len()+len(w.tail))
+	out = append(out, w.buf.Bytes()...)
 	out = append(out, w.tail...)
 	return out
+}
+
+// stats 返回构造 Result 所需的计数，避免调用方直接读未加锁的字段。
+func (w *limitedWriter) stats() (written, newlines int, truncated bool, fullErr error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.written, w.newlines, w.truncated, w.fullErr
 }
 
 func terminateSession(session *ssh.Session) {
 	// 必须先发 SSH signal；只关闭 channel 不会终止 OpenSSH 的远端进程组。
 	_ = session.Signal(ssh.SIGKILL)
 	_ = session.Close()
+}
+
+// waitGrace 是 terminateSession 之后等待 session.Wait() 返回的上限。等待本身是必需的：
+// x/crypto/ssh 内部为 stdout / stderr 起的拷贝 goroutine 只有在 Wait 之后才保证退出。
+const waitGrace = 3 * time.Second
+
+// awaitSessionExit 排空 session.Wait 的结果，保证输出不再被后台 goroutine 写入。
+// 超过宽限期仍不返回时按 reportErr 结束——此时 limitedWriter 的锁仍能避免撕裂读取。
+func awaitSessionExit(done <-chan error, reportErr error) error {
+	timer := time.NewTimer(waitGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return reportErr
+	case <-timer.C:
+		return reportErr
+	}
 }
 
 func (r *Runner) Run(ctx context.Context, client *ssh.Client, command, cwd string, env map[string]string, opt Options) (Result, error) {
@@ -299,11 +340,11 @@ func (r *Runner) Run(ctx context.Context, client *ssh.Client, command, cwd strin
 	case <-ctx.Done():
 		timedOut = true
 		terminateSession(session)
-		waitErr = ctx.Err()
+		waitErr = awaitSessionExit(done, ctx.Err())
 	case <-timer.C:
 		timedOut = true
 		terminateSession(session)
-		waitErr = errors.New("command timeout")
+		waitErr = awaitSessionExit(done, errors.New("command timeout"))
 	}
 	stdoutBytes := stdout.captured()
 	exitCode, newCwd, clean, parsed := parseTrailerWithMarker(stdoutBytes, trailerMarker)
@@ -330,18 +371,20 @@ func (r *Runner) Run(ctx context.Context, client *ssh.Client, command, cwd strin
 			captureErr = errors.Join(captureErr, stripCaptureTrailer(capture.stdoutPath, trailerMarker))
 		}
 	}
-	captureErr = errors.Join(captureErr, stdout.fullErr, stderr.fullErr)
-	combined := append(append([]byte(nil), stdoutBytes...), stderrBytes...)
+	stdoutWritten, stdoutNewlines, stdoutTruncated, stdoutFullErr := stdout.stats()
+	stderrWritten, stderrNewlines, stderrTruncated, stderrFullErr := stderr.stats()
+	captureErr = errors.Join(captureErr, stdoutFullErr, stderrFullErr)
+	combined := combineOutput(stdoutBytes, stderrBytes)
 	selected, capturedLines, lineCut := selectLines(combined, opt.MaxLines, opt.Tail)
 	totalLines := capturedLines
-	if stdout.truncated || stderr.truncated {
-		totalLines = stdout.newlines + stderr.newlines
+	if stdoutTruncated || stderrTruncated {
+		totalLines = stdoutNewlines + stderrNewlines
 		if parsed {
 			totalLines--
 		}
 	}
-	stdoutTotal := max(0, stdout.written-trailerBytes)
-	res := Result{Stdout: string(stdoutBytes), Stderr: string(stderrBytes), Output: string(selected), ExitCode: exitCode, ExitCodeKnown: exitCodeKnown, Cwd: newCwd, Timeout: timedOut, Truncated: stdout.truncated || stderr.truncated || lineCut, TotalLines: totalLines, TotalBytes: stdoutTotal + stderr.written, StdoutBytes: stdoutTotal, StderrBytes: stderr.written, OutputRecorded: opt.CaptureID != "" && capture != nil && captureErr == nil}
+	stdoutTotal := max(0, stdoutWritten-trailerBytes)
+	res := Result{Stdout: string(stdoutBytes), Stderr: string(stderrBytes), Output: string(selected), ExitCode: exitCode, ExitCodeKnown: exitCodeKnown, Cwd: newCwd, Timeout: timedOut, Truncated: stdoutTruncated || stderrTruncated || lineCut, TotalLines: totalLines, TotalBytes: stdoutTotal + stderrWritten, StdoutBytes: stdoutTotal, StderrBytes: stderrWritten, OutputRecorded: opt.CaptureID != "" && capture != nil && captureErr == nil}
 	if captureErr != nil {
 		res.OutputCaptureError = captureErr.Error()
 	}
@@ -489,6 +532,15 @@ func exitCodeFromError(err error) int {
 	}
 	return -1
 }
+
+// combineOutput 一次分配到位，避免 append(nil, ...) 触发的两次扩容拷贝。
+func combineOutput(stdout, stderr []byte) []byte {
+	out := make([]byte, 0, len(stdout)+len(stderr))
+	out = append(out, stdout...)
+	out = append(out, stderr...)
+	return out
+}
+
 func selectLines(data []byte, maxLines int, tail bool) ([]byte, int, bool) {
 	if len(data) == 0 {
 		return nil, 0, false

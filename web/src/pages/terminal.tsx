@@ -28,7 +28,7 @@ export function TerminalPage() {
   // 归档主机不可作为连接目标；已选主机被归档后自动退回未选择
   const hosts = allHosts.filter((item) => !item.archived)
   const host = hosts.some((item) => item.name === picked) ? picked : undefined
-  const { mountRef, status, connect, disconnect } = useTerminal()
+  const { mountRef, status, connect, disconnect, resetForHostChange } = useTerminal()
   const current = statusPresentation[status]
 
   return (
@@ -44,7 +44,10 @@ export function TerminalPage() {
           <Card className="flex shrink-0 flex-wrap items-center gap-2 p-2.5">
             <Select
               value={host}
-              onChange={setPicked}
+              onChange={(nextHost) => {
+                if (nextHost !== host) resetForHostChange()
+                setPicked(nextHost)
+              }}
               options={hosts.map((item) => ({ value: item.name, label: item.name }))}
               placeholder="选择主机"
               disabled={isLoading}

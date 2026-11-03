@@ -15,6 +15,7 @@ const HANDSHAKE_TIMEOUT = 15_000
 export function useTerminal() {
   const mountRef = useRef<HTMLDivElement>(null)
   const terminal = useRef<GhosttyTerminal>()
+  const fitAddon = useRef<FitAddon>()
   const socket = useRef<WebSocket>()
   const watchdog = useRef<number>()
   // 每次 connect 递增：异步回调用它判断自己是否已被后来的连接取代
@@ -31,13 +32,30 @@ export function useTerminal() {
     socket.current = undefined
   }, [])
 
+  const resetTerminal = useCallback(() => {
+    if (terminal.current) {
+      terminal.current.reset()
+      terminal.current.clearSelection()
+      fitAddon.current?.fit()
+      return
+    }
+    mountRef.current?.replaceChildren()
+  }, [])
+
+  const disposeTerminal = useCallback(() => {
+    terminal.current?.dispose()
+    terminal.current = undefined
+    fitAddon.current = undefined
+    mountRef.current?.replaceChildren()
+  }, [])
+
   useEffect(
     () => () => {
       attempt.current += 1
       detach()
-      terminal.current?.dispose()
+      disposeTerminal()
     },
-    [detach],
+    [detach, disposeTerminal],
   )
 
   const disconnect = useCallback(() => {
@@ -47,6 +65,13 @@ export function useTerminal() {
     setStatus((prev) => (prev === 'connected' ? 'closed' : 'idle'))
   }, [detach])
 
+  const resetForHostChange = useCallback(() => {
+    attempt.current += 1
+    detach()
+    resetTerminal()
+    setStatus('idle')
+  }, [detach, resetTerminal])
+
   const connect = useCallback(
     async (hostName: string) => {
       const mount = mountRef.current
@@ -54,6 +79,7 @@ export function useTerminal() {
 
       const token = (attempt.current += 1)
       detach()
+      resetTerminal()
       setStatus('connecting')
 
       try {
@@ -71,9 +97,6 @@ export function useTerminal() {
       }
       if (attempt.current !== token) return
 
-      terminal.current?.dispose()
-      mount.innerHTML = ''
-
       // Canvas 不会在字体晚到后自动重绘；常规与粗体都必须先就绪，否则 ANSI Bold 会用
       // 非等宽 fallback 画进既定单元格，造成字符重叠。
       try {
@@ -90,18 +113,36 @@ export function useTerminal() {
       }
       if (attempt.current !== token) return
 
-      const term = new GhosttyTerminal({
-        cursorBlink: true,
-        fontFamily: '"JetBrainsMono Nerd Font Mono", "PingFang SC", monospace',
-        fontSize: 14,
-        theme: { background: '#0b0d10', foreground: '#d6e4ff' },
-      })
-      const fit = new FitAddon()
-      term.loadAddon(fit)
-      term.open(mount)
-      fit.fit()
-      fit.observeResize()
-      terminal.current = term
+      let term = terminal.current
+      if (!term) {
+        term = new GhosttyTerminal({
+          cursorBlink: true,
+          fontFamily: '"JetBrainsMono Nerd Font Mono", "PingFang SC", monospace',
+          fontSize: 14,
+          theme: { background: '#0b0d10', foreground: '#d6e4ff' },
+        })
+        const fit = new FitAddon()
+        term.loadAddon(fit)
+        term.open(mount)
+        fit.fit()
+        fit.observeResize()
+        terminal.current = term
+        fitAddon.current = fit
+        term.onData((data) => {
+          const activeSocket = socket.current
+          if (activeSocket?.readyState === WebSocket.OPEN) {
+            activeSocket.send(JSON.stringify({ type: 'input', data }))
+          }
+        })
+        term.onResize(({ cols, rows }) => {
+          const activeSocket = socket.current
+          if (activeSocket?.readyState === WebSocket.OPEN) {
+            activeSocket.send(JSON.stringify({ type: 'resize', cols, rows }))
+          }
+        })
+      } else {
+        fitAddon.current?.fit()
+      }
 
       const proto = location.protocol === 'https:' ? 'wss' : 'ws'
       const ws = new WebSocket(
@@ -140,18 +181,9 @@ export function useTerminal() {
         setStatus('error')
       }, HANDSHAKE_TIMEOUT)
 
-      term.onData(
-        (data) =>
-          ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'input', data })),
-      )
-      term.onResize(
-        ({ cols, rows }) =>
-          ws.readyState === WebSocket.OPEN &&
-          ws.send(JSON.stringify({ type: 'resize', cols, rows })),
-      )
     },
-    [detach],
+    [detach, resetTerminal],
   )
 
-  return { mountRef, status, connect, disconnect }
+  return { mountRef, status, connect, disconnect, resetForHostChange }
 }

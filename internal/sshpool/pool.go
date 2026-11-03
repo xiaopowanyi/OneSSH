@@ -20,12 +20,23 @@ const (
 	// maxJumpChain 须与 hostmanager 中的同名常量保持一致。
 	maxJumpChain      = 5
 	sshConnectTimeout = 15 * time.Second
+	keepaliveInterval = 30 * time.Second
+	// keepaliveReplyTimeout 是等待对端应答 keepalive 的上限，见 pingKeepalive。
+	keepaliveReplyTimeout = 10 * time.Second
 )
 
 type entry struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// dialMu 串行化同一主机的拨号。它与 mu 刻意分离：GetHostByName 与最长 15 秒的 SSH
+	// 握手都不该发生在 mu 的保护范围内，否则调用方在列表里逐台探测在线状态时，
+	// 一台不响应的主机就能把整个池堵住。
+	dialMu sync.Mutex
 	client *ssh.Client
 	online bool
+	// generation 每次主动作废连接（Invalidate、keepalive 判死）都会递增。拨号前后比对
+	// 它可以识别出「握手期间连接已被作废」这种情况，避免把一条注定要被丢弃的连接
+	// 登记进池里。
+	generation int
 }
 type Pool struct {
 	store   *store.Store
@@ -60,24 +71,58 @@ func (p *Pool) get(ctx context.Context, name string, via []string) (*ssh.Client,
 		return nil, fmt.Errorf("跳板链超过 %d 级", maxJumpChain)
 	}
 	e := p.getEntry(name)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.client != nil && e.online {
-		return e.client, nil
+	// dialMu 而不是 mu：同主机的并发 Get 依旧串行（不会重复拨号），但列表探测在线状态
+	// 这类只读调用不必再排队等一次完整的握手。
+	e.dialMu.Lock()
+	defer e.dialMu.Unlock()
+	if client := e.current(); client != nil {
+		return client, nil
 	}
 	h, err := p.store.GetHostByName(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("unknown host: %s", name)
 	}
+	generation := e.snapshotGeneration()
 	client, err := p.dial(ctx, h, via)
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if err != nil {
 		e.online = false
 		return nil, err
+	}
+	// Close 会先关闭 p.closed 再遍历 entries，所以这里的检查配合它的顺序即足以
+	// 避免「已关闭的池又登记进一条没人管的连接」。
+	select {
+	case <-p.closed:
+		client.Close()
+		return nil, fmt.Errorf("连接池已关闭")
+	default:
+	}
+	if e.generation != generation {
+		// 握手期间连接被 Invalidate 或 keepalive 判死，这条连接已经不再被信任。
+		client.Close()
+		return nil, fmt.Errorf("主机 %s 的连接在建立过程中被作废，请重试", name)
 	}
 	e.client = client
 	e.online = true
 	go p.keepalive(name, e, client)
 	return client, nil
+}
+
+// current 返回当前可用的连接；调用方不需要持有 mu。
+func (e *entry) current() *ssh.Client {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.client != nil && e.online {
+		return e.client
+	}
+	return nil
+}
+
+func (e *entry) snapshotGeneration() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.generation
 }
 func (p *Pool) dial(ctx context.Context, h store.Host, via []string) (*ssh.Client, error) {
 	var (
@@ -236,30 +281,61 @@ func passwordChallenge(password string) ssh.KeyboardInteractiveChallenge {
 }
 func nameAddr(h store.Host) string { return h.Name + "(" + h.Addr + ")" }
 func (p *Pool) keepalive(name string, e *entry, c *ssh.Client) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-p.closed:
 			return
 		case <-ticker.C:
-			_, _, err := c.SendRequest("keepalive@onessh", true, nil)
-			if err != nil {
-				e.mu.Lock()
-				if e.client == c {
-					e.online = false
-					e.client = nil
-				}
-				e.mu.Unlock()
-				c.Close()
-				log.Printf("SSH %s keepalive 失败: %v", name, err)
-				return
+			keepaliveErr := pingKeepalive(c)
+			if keepaliveErr == nil {
+				continue
 			}
+			e.mu.Lock()
+			if e.client == c {
+				e.online = false
+				e.client = nil
+				e.generation++
+			}
+			e.mu.Unlock()
+			c.Close()
+			log.Printf("SSH %s keepalive 失败: %v", name, keepaliveErr)
+			return
 		}
 	}
 }
+
+// pingKeepalive 给 keepalive 请求一个应答期限。SendRequest 的 wantReply=true 会一直阻塞到
+// 对端应答或连接失败：万一网络被静默丢弃（既不返回数据也不发 RST），这条 goroutine 会永久
+// 挂住，连接始终被标记为在线，直到操作系统几小时后才回收 TCP。超时后主动 Close，既立即
+// 判定连接已死，也让阻塞在 SendRequest 上的 goroutine 带着错误退出，不会堆积。
+func pingKeepalive(c *ssh.Client) error {
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.SendRequest("keepalive@onessh", true, nil)
+		done <- err
+	}()
+	timer := time.NewTimer(keepaliveReplyTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		c.Close()
+		return fmt.Errorf("应答超过 %s", keepaliveReplyTimeout)
+	}
+}
+
+// IsOnline 是纯粹的只读查询，刻意不复用 getEntry：后者会为任意主机名凭空创建 entry，
+// 让「这台主机连没连上」这种询问反过来修改池的状态。
 func (p *Pool) IsOnline(name string) bool {
-	e := p.getEntry(name)
+	p.mu.Lock()
+	e := p.entries[name]
+	p.mu.Unlock()
+	if e == nil {
+		return false
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.online
@@ -273,6 +349,7 @@ func (p *Pool) Invalidate(name string) {
 	}
 	e.client = nil
 	e.online = false
+	e.generation++
 }
 func (p *Pool) Close() {
 	select {
