@@ -55,6 +55,12 @@ export type JobStatus = {
   refresh_error?: string
 }
 
+export type JobHistoryCursor = { started_at: number; id: string }
+export type JobHistoryPage = {
+  items: JobStatus[]
+  next_before: JobHistoryCursor | null
+}
+
 export type Metric = {
   host_id: number
   ts: number

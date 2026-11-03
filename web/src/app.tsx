@@ -1,25 +1,29 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MotionConfig } from 'motion/react'
 import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Toaster } from 'sonner'
 import { UNAUTHORIZED_EVENT } from '@/api/client'
 import { AppShell } from '@/components/layout/app-shell'
+import { ErrorBoundary } from '@/components/ui/error-boundary'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { ThemeProvider, useTheme } from '@/lib/theme'
-import { ActivityPage } from '@/pages/activity'
-import { DashboardPage } from '@/pages/dashboard'
-import { FilesPage } from '@/pages/files'
-import { HostsPage } from '@/pages/hosts'
-import { JobsPage } from '@/pages/jobs'
-import { KeysPage } from '@/pages/keys'
-import { LoginPage } from '@/pages/login'
-import { MemoriesPage } from '@/pages/memories'
-import { MetricsPage } from '@/pages/metrics'
-import { NotFoundPage } from '@/pages/not-found'
-import { OAuthAuthorizePage } from '@/pages/oauth-authorize'
-import { TerminalPage } from '@/pages/terminal'
-import { TokensPage } from '@/pages/tokens'
+
+const ActivityPage = lazy(() => import('@/pages/activity').then((page) => ({ default: page.ActivityPage })))
+const DashboardPage = lazy(() => import('@/pages/dashboard').then((page) => ({ default: page.DashboardPage })))
+const FilesPage = lazy(() => import('@/pages/files').then((page) => ({ default: page.FilesPage })))
+const HostsPage = lazy(() => import('@/pages/hosts').then((page) => ({ default: page.HostsPage })))
+const JobsPage = lazy(() => import('@/pages/jobs').then((page) => ({ default: page.JobsPage })))
+const KeysPage = lazy(() => import('@/pages/keys').then((page) => ({ default: page.KeysPage })))
+const LoginPage = lazy(() => import('@/pages/login').then((page) => ({ default: page.LoginPage })))
+const MemoriesPage = lazy(() => import('@/pages/memories').then((page) => ({ default: page.MemoriesPage })))
+const MetricsPage = lazy(() => import('@/pages/metrics').then((page) => ({ default: page.MetricsPage })))
+const NotFoundPage = lazy(() => import('@/pages/not-found').then((page) => ({ default: page.NotFoundPage })))
+const OAuthAuthorizePage = lazy(() =>
+  import('@/pages/oauth-authorize').then((page) => ({ default: page.OAuthAuthorizePage })),
+)
+const TerminalPage = lazy(() => import('@/pages/terminal').then((page) => ({ default: page.TerminalPage })))
+const TokensPage = lazy(() => import('@/pages/tokens').then((page) => ({ default: page.TokensPage })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -72,25 +76,37 @@ export default function App() {
           <TooltipProvider delayDuration={200}>
             <BrowserRouter>
               <AuthGuard />
-              <Routes>
-                <Route path="/login" element={<LoginPage />} />
-                {/* 授权页是给第三方客户端看的独立全页，不套 AppShell 的导航与顶栏 */}
-                <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
-                <Route element={<AppShell />}>
-                  <Route index element={<DashboardPage />} />
-                  <Route path="hosts" element={<HostsPage />} />
-                  <Route path="keys" element={<KeysPage />} />
-                  <Route path="tokens" element={<TokensPage />} />
-                  <Route path="terminal" element={<TerminalPage />} />
-                  <Route path="files" element={<FilesPage />} />
-                  <Route path="jobs" element={<JobsPage />} />
-                  <Route path="activity" element={<ActivityPage />} />
-                  <Route path="metrics" element={<MetricsPage />} />
-                  <Route path="memories" element={<MemoriesPage />} />
-                  {/* 未知路径仍留在 AppShell 内，用户可直接从侧边栏跳走 */}
-                  <Route path="*" element={<NotFoundPage />} />
-                </Route>
-              </Routes>
+              {/* 边界放在 Suspense 外侧：懒加载 chunk 拉取失败时，错误由 Suspense 向外抛出，
+                  只有外层边界能同时兜住「加载失败」与「渲染抛错」两种情况 */}
+              <ErrorBoundary>
+                <Suspense
+                  fallback={
+                    <div className="grid min-h-[60dvh] place-items-center text-sm text-muted">
+                      正在加载页面…
+                    </div>
+                  }
+                >
+                  <Routes>
+                    <Route path="/login" element={<LoginPage />} />
+                    {/* 授权页是给第三方客户端看的独立全页，不套 AppShell 的导航与顶栏 */}
+                    <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
+                    <Route element={<AppShell />}>
+                      <Route index element={<DashboardPage />} />
+                      <Route path="hosts" element={<HostsPage />} />
+                      <Route path="keys" element={<KeysPage />} />
+                      <Route path="tokens" element={<TokensPage />} />
+                      <Route path="terminal" element={<TerminalPage />} />
+                      <Route path="files" element={<FilesPage />} />
+                      <Route path="jobs" element={<JobsPage />} />
+                      <Route path="activity" element={<ActivityPage />} />
+                      <Route path="metrics" element={<MetricsPage />} />
+                      <Route path="memories" element={<MemoriesPage />} />
+                      {/* 未知路径仍留在 AppShell 内，用户可直接从侧边栏跳走 */}
+                      <Route path="*" element={<NotFoundPage />} />
+                    </Route>
+                  </Routes>
+                </Suspense>
+              </ErrorBoundary>
             </BrowserRouter>
             <ThemedToaster />
           </TooltipProvider>

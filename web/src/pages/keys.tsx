@@ -303,6 +303,7 @@ export function KeysPage() {
                       <Input
                         id={id}
                         type="password"
+                        placeholder="私钥口令（可选）"
                         autoComplete="new-password"
                         {...register('passphrase')}
                       />
