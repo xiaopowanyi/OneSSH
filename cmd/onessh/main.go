@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"onessh/internal/config"
@@ -22,7 +25,17 @@ import (
 
 var version = "dev"
 
+// gracefulShutdownTimeout 是留给在途 HTTP 请求（含 SSE 与 WebSocket 终端）收尾的时间。
+// 这些长连接会一直占用活动连接计数，Shutdown 只能等到它们结束或超时。
+const gracefulShutdownTimeout = 15 * time.Second
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "compact-db" {
+		if err := compactDB(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -82,9 +95,54 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": version})
 	})
 	mux.Handle("/", web.Handler())
-	server := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// 不设 WriteTimeout：它会掐断 SSE 活动流与 WebSocket 终端这样的长连接。
+	server := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       180 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	// 没有信号处理的 ListenAndServe 一旦收到 SIGTERM 就直接终止进程，导致本函数所有
+	// defer 都不执行：SQLite 来不及 checkpoint，连接池里的 SSH 连接被粗暴断开。
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-shutdownCtx.Done()
+		log.Printf("收到停止信号，开始优雅停机")
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			// 多为仍有 SSH 终端或 SSE 未退出，硬性关掉监听以免进程悬挂。
+			log.Printf("优雅停机超时，强制关闭监听: %v", err)
+			_ = server.Close()
+		}
+	}()
+
 	log.Printf("OneSSH %s 监听 %s", version, cfg.Listen)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.New(os.Stderr, "", 0).Fatal(err)
 	}
+	// 走到这里监听已经停止，defer 会把 mcpService（后台轮询与文件连接）、连接池和 SQLite
+	// 按注册的逆序收掉。
+	log.Printf("OneSSH 已停止")
+}
+
+// compactDB performs the resumable, lossless metric compression and SQLite
+// compaction without requiring the server's encryption or admin credentials.
+func compactDB() error {
+	dataDir := os.Getenv("ONESSH_DATA_DIR")
+	if dataDir == "" {
+		dataDir = "/data"
+	}
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	return st.CompactMetricStorage(ctx)
 }

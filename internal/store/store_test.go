@@ -13,6 +13,8 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+const expectedMigrationCount = 19
+
 func TestOpenCreatesSchema(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {
@@ -322,7 +324,7 @@ func TestOpenUpgradesLegacyDatabase(t *testing.T) {
 	if err = st.DB.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 15 {
+	if versions != expectedMigrationCount {
 		t.Fatalf("二次迁移版本数 = %d", versions)
 	}
 }
@@ -351,7 +353,7 @@ func TestOpenRecordsPreexistingManageHostsColumn(t *testing.T) {
 	if err = st.DB.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 15 {
+	if versions != expectedMigrationCount {
 		t.Fatalf("迁移登记数 = %d", versions)
 	}
 }
@@ -397,7 +399,7 @@ func TestOpenRecordsPreexistingAuditTokenNameColumn(t *testing.T) {
 	if err = st.DB.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 15 {
+	if versions != expectedMigrationCount {
 		t.Fatalf("迁移登记数 = %d", versions)
 	}
 }
@@ -426,7 +428,7 @@ func TestOpenRecordsPreexistingJobLogBytesColumn(t *testing.T) {
 	if err = st.DB.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 15 {
+	if versions != expectedMigrationCount {
 		t.Fatalf("迁移登记数 = %d", versions)
 	}
 }
@@ -522,7 +524,7 @@ func TestOpenAddsMissingCommandRunOutputCleanedColumn(t *testing.T) {
 	if err = st.DB.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 15 {
+	if versions != expectedMigrationCount {
 		t.Fatalf("迁移登记数 = %d", versions)
 	}
 	var cleanedColumns int
@@ -559,7 +561,7 @@ func TestOpenRecordsPreexistingAuditCommandRunIDsColumn(t *testing.T) {
 	if err = st.DB.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 15 {
+	if versions != expectedMigrationCount {
 		t.Fatalf("迁移登记数 = %d", versions)
 	}
 	audit, err := st.ListAudit(context.Background(), nil, nil, nil, nil, 0, 10)

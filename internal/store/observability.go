@@ -13,6 +13,23 @@ import (
 // token 条件每项占 3 个变量；三个维度各 100 项时总计不超过 500。
 const MaxAuditFilterValues = 100
 
+// AuditRetention 是审计记录的保留时长。审计是安全追溯的主要依据，保留期刻意长于
+// 指标、命令输出与 artifact（均为 7 天）。在此之上刻意不提供「永不过期」选项：
+// 审计表每次 MCP 调用都会写入，没有上界时会一直增长到拖垮整个数据目录。
+const AuditRetention = 90 * 24 * time.Hour
+
+// CleanupAudit 删除保留期之前的审计记录并返回删除行数。audit_ts 索引让这条 DELETE
+// 直接命中时间范围，不会变成全表扫描。
+func (s *Store) CleanupAudit(ctx context.Context, cutoff int64) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM audit WHERE ts<?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) AddAudit(ctx context.Context, a Audit) error {
 	var runIDs any
 	if len(a.RunIDs) > 0 {
@@ -129,14 +146,22 @@ func (s *Store) ListAuditTools(ctx context.Context) ([]string, error) {
 	return tools, rows.Err()
 }
 func (s *Store) AddMetric(ctx context.Context, m Metric) error {
+	disks, _, err := encodeMetricDisks(m.DisksJSON)
+	if err != nil {
+		return fmt.Errorf("压缩磁盘指标: %w", err)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	_, err := s.DB.ExecContext(ctx, `INSERT OR REPLACE INTO metrics(host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json) VALUES(?,?,?,?,?,?,?)`, m.HostID, m.Ts, nullFloat(m.CPUPct), nullInt(m.MemUsedKB), nullInt(m.MemTotalKB), nullFloat(m.Load1), m.DisksJSON)
+	_, err = s.DB.ExecContext(ctx, `INSERT OR REPLACE INTO metrics(host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json) VALUES(?,?,?,?,?,?,?)`, m.HostID, m.Ts, nullFloat(m.CPUPct), nullInt(m.MemUsedKB), nullInt(m.MemTotalKB), nullFloat(m.Load1), disks)
 	return err
 }
 func (s *Store) LatestMetric(ctx context.Context, hostID int64) (Metric, error) {
 	var m Metric
-	err := s.DB.QueryRowContext(ctx, `SELECT host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json FROM metrics WHERE host_id=? ORDER BY ts DESC LIMIT 1`, hostID).Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &m.DisksJSON)
+	var disks sql.NullString
+	err := s.DB.QueryRowContext(ctx, `SELECT host_id,ts,cpu_pct,mem_used_kb,mem_total_kb,load1,disks_json FROM metrics WHERE host_id=? ORDER BY ts DESC LIMIT 1`, hostID).Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &disks)
+	if err == nil && disks.Valid {
+		m.DisksJSON, err = decodeMetricDisks(disks.String)
+	}
 	return m, err
 }
 func (s *Store) MetricsSince(ctx context.Context, hostID, since int64) ([]Metric, error) {
@@ -148,8 +173,15 @@ func (s *Store) MetricsSince(ctx context.Context, hostID, since int64) ([]Metric
 	out := make([]Metric, 0)
 	for rows.Next() {
 		var m Metric
-		if err := rows.Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &m.DisksJSON); err != nil {
+		var disks sql.NullString
+		if err := rows.Scan(&m.HostID, &m.Ts, &m.CPUPct, &m.MemUsedKB, &m.MemTotalKB, &m.Load1, &disks); err != nil {
 			return nil, err
+		}
+		if disks.Valid {
+			m.DisksJSON, err = decodeMetricDisks(disks.String)
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, m)
 	}

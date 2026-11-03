@@ -69,6 +69,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("DELETE /tokens/{id}", a.token)
 	mux.HandleFunc("GET /tool-groups", a.toolGroups)
 	mux.HandleFunc("GET /jobs", a.jobsList)
+	mux.HandleFunc("GET /jobs/history", a.jobsHistory)
 	mux.HandleFunc("POST /jobs/{id}/kill", a.jobKill)
 	mux.HandleFunc("GET /jobs/{id}/logs", a.jobLogs)
 	mux.HandleFunc("GET /command-runs", a.commandRuns)
@@ -87,6 +88,23 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /events", a.sse)
 	mux.HandleFunc("GET /ws/terminal", a.terminal)
 	return mux
+}
+
+const maxJSONBodyBytes = 64 << 10
+const maxKeyImportBodyBytes = 1 << 20
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	return json.NewDecoder(r.Body).Decode(dst)
+}
+
+func decodeJSONError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		apiError(w, http.StatusRequestEntityTooLarge, errors.New("请求体超过大小限制"))
+		return
+	}
+	apiError(w, http.StatusBadRequest, err)
 }
 func jsonOut(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -131,8 +149,8 @@ func (a *API) hosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in hostInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		apiError(w, 400, err)
+	if err := decodeJSONBody(w, r, &in, maxJSONBodyBytes); err != nil {
+		decodeJSONError(w, err)
 		return
 	}
 	h, err := a.Hosts.Create(r.Context(), in)
@@ -157,8 +175,8 @@ func (a *API) host(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in hostInput
-	if err = json.NewDecoder(r.Body).Decode(&in); err != nil {
-		apiError(w, 400, err)
+	if err = decodeJSONBody(w, r, &in, maxJSONBodyBytes); err != nil {
+		decodeJSONError(w, err)
 		return
 	}
 	h, err := a.Hosts.Update(r.Context(), id, in)
@@ -232,8 +250,8 @@ func (a *API) keys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in keyInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		apiError(w, 400, err)
+	if err := decodeJSONBody(w, r, &in, maxKeyImportBodyBytes); err != nil {
+		decodeJSONError(w, err)
 		return
 	}
 	var private []byte
@@ -370,22 +388,21 @@ func normalizeTokenDisabledTools(names []string) ([]string, error) {
 
 func (a *API) tokens(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		list, err := a.Store.ListTokens(r.Context())
+		list, err := a.Store.ListTokensWithHosts(r.Context())
 		if err != nil {
 			apiError(w, 500, err)
 			return
 		}
 		out := make([]tokenView, 0, len(list))
-		for _, t := range list {
-			ids, _ := a.Store.TokenHostIDs(r.Context(), t.ID)
-			out = append(out, tokenView{Token: t, HostIDs: ids})
+		for _, item := range list {
+			out = append(out, tokenView{Token: item.Token, HostIDs: item.HostIDs})
 		}
 		jsonOut(w, 200, out)
 		return
 	}
 	var in tokenInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		apiError(w, 400, err)
+	if err := decodeJSONBody(w, r, &in, maxJSONBodyBytes); err != nil {
+		decodeJSONError(w, err)
 		return
 	}
 	disabled, err := normalizeTokenDisabledTools(in.DisabledTools)
@@ -471,12 +488,41 @@ func (a *API) jobsList(w http.ResponseWriter, r *http.Request) {
 		}
 		hostID = &h.ID
 	}
-	list, err := a.Store.ListJobs(r.Context(), nil, hostID)
+	list, err := a.Store.ListJobDashboard(r.Context(), hostID)
 	if err != nil {
 		apiError(w, 500, err)
 		return
 	}
 	jsonOut(w, 200, a.Jobs.RefreshAll(r.Context(), list))
+}
+
+type jobHistoryResponse struct {
+	Items      []jobs.Status    `json:"items"`
+	NextBefore *store.JobCursor `json:"next_before"`
+}
+
+func (a *API) jobsHistory(w http.ResponseWriter, r *http.Request) {
+	startedRaw, id := r.URL.Query().Get("before_ts"), r.URL.Query().Get("before_id")
+	if startedRaw == "" || id == "" {
+		apiError(w, http.StatusBadRequest, errors.New("before_ts 和 before_id 必须同时提供"))
+		return
+	}
+	startedAt, err := strconv.ParseInt(startedRaw, 10, 64)
+	if err != nil || startedAt <= 0 {
+		apiError(w, http.StatusBadRequest, errors.New("before_ts 无效"))
+		return
+	}
+	before := &store.JobCursor{StartedAt: startedAt, ID: id}
+	list, next, err := a.Store.ListJobHistory(r.Context(), nil, before, store.JobHistoryPageSize)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := jobHistoryResponse{Items: make([]jobs.Status, 0, len(list)), NextBefore: next}
+	for _, j := range list {
+		out.Items = append(out.Items, jobs.Status{Job: jobs.ViewJob(j), LogBytes: j.LogBytes})
+	}
+	jsonOut(w, 200, out)
 }
 func (a *API) jobKill(w http.ResponseWriter, r *http.Request) {
 	j, err := a.Store.GetJob(r.Context(), r.PathValue("id"))
